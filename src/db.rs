@@ -1,13 +1,9 @@
-use std::env;
-
-use dotenvy::dotenv;
 use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
+use std::env;
 
 pub type Db = Pool<Postgres>;
 
 pub async fn connect_db() -> Result<Db, sqlx::Error> {
-    dotenv().ok();
-
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL not set");
 
     let pool = PgPoolOptions::new()

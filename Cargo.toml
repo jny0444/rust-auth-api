@@ -8,6 +8,7 @@ axum = "0.8.4"
 tokio = { version = "*", features = ["full"] }
 sqlx = { version = "*", features = ["runtime-tokio", "postgres", "uuid"] }
 uuid = { version = "*", features = ["v4", "serde"] }
+chrono = { version = "*", features = ["serde"] }
 argon2 = { version = "*", features = ["password-hash"] }
 jsonwebtoken = "9.3.1"
 serde = { version = "*", features = ["derive"] }
