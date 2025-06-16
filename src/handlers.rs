@@ -1,144 +1,134 @@
 use argon2::{
-    Argon2, Error, PasswordVerifier,
-    password_hash::{SaltString, rand_core::OsRng},
+    Argon2, PasswordHash, PasswordVerifier,
+    password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
 };
 use axum::{
     Json,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    extract::{Request, State},
+    http::{StatusCode, header::AUTHORIZATION},
 };
-use chrono::{Duration, Utc};
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use sqlx::PgPool;
-use std::{env, str::from_utf8};
 use uuid::Uuid;
 
-use crate::models::{LoginPayload, RegisterPayload, User, UserWithHash};
+use crate::{
+    auth::{generate_jwt, verify_jwt},
+    db::Db,
+    models::{LoginPayload, RegisterPayload, User, UserResponse},
+};
 
-pub fn hash_password(password: &str) -> Result<String, Error> {
+/*
+pub async fn register(
+    State(db): State<Db>,
+    Json(payload): Json<RegisterPayload>,
+) -> Result<Json<UserResponse>, StatusCode> {
     let salt = SaltString::generate(&mut OsRng);
-    let mut hash_buf = [0u8; 128];
 
-    Argon2::default().hash_password_into(
-        password.as_bytes(),
-        salt.as_str().as_bytes(),
-        &mut hash_buf,
-    )?;
+    let mut hashed_output = [0u8; 32];
 
-    let len = hash_buf
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(hash_buf.len());
+    Argon2::default()
+        .hash_password_into(
+            payload.password.as_bytes(),
+            salt.as_str().as_bytes(),
+            &mut hashed_output,
+        )
+        .unwrap();
+    let hash_str = hex::encode(hashed_output);
 
-    Ok(from_utf8(&hash_buf[..len]).unwrap().to_string())
+    let user_uuid = Uuid::new_v4();
+
+    let user = sqlx::query_as!(
+    User,
+        "INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3) RETURNING id, email, password_hash",
+        user_uuid,
+        payload.email,
+        hash_str,
+    ).fetch_one(&db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(UserResponse {
+        id: user.id,
+        email: user.email,
+    }))
 }
-
-#[derive(Serialize, Deserialize)]
-struct Claims {
-    sub: String,
-    exp: usize,
-}
+*/
 
 pub async fn register(
-    State(pool): State<PgPool>,
+    State(db): State<Db>,
     Json(payload): Json<RegisterPayload>,
-) -> impl IntoResponse {
-    let hashed = match hash_password(&payload.password) {
-        Ok(h) => h,
-        Err(_) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to hash password").into_response();
-        }
-    };
+) -> Result<Json<UserResponse>, StatusCode> {
+    let salt = SaltString::generate(&mut OsRng);
 
-    let user = match sqlx::query_as!(
+    let password_hash_str = Argon2::default()
+        .hash_password(payload.password.as_bytes(), &salt)
+        .map_err(|e| {
+            eprintln!("Failed to hash password: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .to_string();
+
+    let user_uuid = Uuid::new_v4();
+
+    let user = sqlx::query_as!(
         User,
-        "INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3) RETURNING id, email",
-        Uuid::new_v4(),
+        "INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3) RETURNING id, email, password_hash",
+        user_uuid,
         payload.email,
-        hashed
+        password_hash_str,
     )
-    .fetch_one(&pool)
+    .fetch_one(&db)
     .await
-    {
-        Ok(user) => user,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "DB error").into_response(),
-    };
+    .map_err(|e| {
+        eprintln!("Failed to insert user into database: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    (StatusCode::CREATED, Json(user)).into_response()
+    Ok(Json(UserResponse {
+        id: user.id,
+        email: user.email,
+    }))
 }
 
 pub async fn login(
-    State(pool): State<PgPool>,
+    State(db): State<Db>,
     Json(payload): Json<LoginPayload>,
-) -> impl IntoResponse {
-    let row = sqlx::query_as!(
-        UserWithHash,
+) -> Result<String, StatusCode> {
+    let user = sqlx::query_as!(
+        User,
         "SELECT id, email, password_hash FROM users WHERE email = $1",
-        payload.email
+        payload.email,
     )
-    .fetch_optional(&pool)
-    .await;
+    .fetch_optional(&db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let user = match row {
-        Ok(Some(u)) => u,
-        _ => return (StatusCode::UNAUTHORIZED, "Invalid Credentials").into_response(),
-    };
+    println!("done db query");
 
-    if !argon2::Argon2::default()
-        .verify_password(
-            payload.password.as_bytes(),
-            &argon2::PasswordHash::new(&user.password_hash).unwrap(),
-        )
-        .is_ok()
-    {
-        return (StatusCode::UNAUTHORIZED, "Invalid Credentials").into_response();
-    }
+    let parsed_hash =
+        PasswordHash::new(&user.password_hash).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let secret = env::var("JWT_SECRET").expect("JWT_SECRET not set");
-    let exp = (Utc::now() + Duration::hours(24)).timestamp() as usize;
-    let claims = Claims {
-        sub: user.id.to_string(),
-        exp,
-    };
+    println!("password hash");
 
-    let token = encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .unwrap();
+    Argon2::default()
+        .verify_password(payload.password.as_bytes(), &parsed_hash)
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
-    (StatusCode::OK, Json(json!({"token": token}))).into_response()
+    let token = generate_jwt(&user.email).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    println!("Generated token: {}", token);
+
+    Ok(token)
 }
 
-pub async fn me(headers: HeaderMap) -> impl IntoResponse {
-    let auth = headers
-        .get("Authorization")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer ").map(|s| s.to_string()));
+pub async fn me(req: Request) -> Result<Json<String>, StatusCode> {
+    let auth_header = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let token = match auth {
-        Some(t) => t,
-        None => return (StatusCode::UNAUTHORIZED, "Missing token").into_response(),
-    };
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let secret = env::var("JWT_SECRET").expect("JWT_SECRET not set");
+    let claims = verify_jwt(token).map_err(|_| StatusCode::UNAUTHORIZED)?;
 
-    let data = decode::<Claims>(
-        &token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
-    );
-
-    match data {
-        Ok(claims) => (
-            StatusCode::OK,
-            Json(json!({ "user_id": claims.claims.sub })),
-        )
-            .into_response(),
-        Err(_) => (StatusCode::UNAUTHORIZED, "Invalid token").into_response(),
-    }
+    Ok(Json(claims.sub))
 }

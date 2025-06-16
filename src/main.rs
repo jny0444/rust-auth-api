@@ -9,6 +9,7 @@ use dotenvy::dotenv;
 use handlers::{login, me, register};
 use tokio::net::TcpListener;
 
+mod auth;
 mod db;
 mod handlers;
 mod models;

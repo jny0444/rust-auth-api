@@ -11,5 +11,7 @@ pub async fn connect_db() -> Result<Db, sqlx::Error> {
         .connect(&db_url)
         .await?;
 
+    println!("DB connected");
+
     Ok(pool)
 }

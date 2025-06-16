@@ -2,14 +2,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::prelude::FromRow;
 use uuid::Uuid;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, FromRow)]
 pub struct User {
-    pub id: Uuid,
-    pub email: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, FromRow)]
-pub struct UserWithHash {
     pub id: Uuid,
     pub email: String,
     pub password_hash: String,
@@ -25,4 +19,10 @@ pub struct RegisterPayload {
 pub struct LoginPayload {
     pub email: String,
     pub password: String,
+}
+
+#[derive(Serialize)]
+pub struct UserResponse {
+    pub id: Uuid,
+    pub email: String,
 }
